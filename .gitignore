@@ -1,0 +1,11 @@
+# Ignore all folders inside diag-woz
+diag-woz/*/
+
+# Ignore all __pycache__ folders everywhere
+**/__pycache__/
+
+# Ignore all .pkl files everywhere
+*.pkl
+
+# Ignore all .csv files everywhere
+*.csv
