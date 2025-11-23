@@ -1,7 +1,0 @@
-librosa
-numpy
-pandas
-sys
-tqdm
-speech_recognition
-pyttx3

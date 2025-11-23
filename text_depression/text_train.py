@@ -4,12 +4,21 @@ from sklearn.model_selection import train_test_split, GridSearchCV, StratifiedKF
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.preprocessing import StandardScaler
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier, VotingClassifier
+from sklearn.linear_model import LogisticRegression
+from sklearn.svm import SVC
 from sklearn.feature_selection import SelectKBest, chi2
-from sklearn.metrics import classification_report, accuracy_score, confusion_matrix, f1_score
+from sklearn.metrics import classification_report, accuracy_score, f1_score
 from imblearn.over_sampling import SMOTE
 from imblearn.combine import SMOTETomek
+from xgboost import XGBClassifier
 import joblib
 import os
+import warnings
+warnings.filterwarnings("ignore", category=UserWarning)
+warnings.filterwarnings("ignore", category=FutureWarning)
+warnings.filterwarnings("ignore", category=RuntimeWarning)
+from sklearn.exceptions import UndefinedMetricWarning
+warnings.filterwarnings("ignore", category=UndefinedMetricWarning)
 from text_config import (
     FEATURES_DIR,
     MODELS_DIR,
@@ -27,50 +36,23 @@ from text_config import (
 )
 from text_feature_extraction import load_transcripts, load_all_labels
 
-def train_text_model():
-    """
-    Train text-based depression detection model
-    ✅ TF-IDF → Feature Selection → SMOTETomek → GridSearch → Ensemble
-    """
+def compare_text_models():
     print("="*60)
     print("LOADING TEXT FEATURES")
     print("="*60)
-    
-    # Load transcripts
     transcripts_df = load_transcripts()
-    
-    # Load labels
     labels_df = load_all_labels()
     labels_df = labels_df.rename(columns={'PHQ8_Binary': 'label'})
-    
-    # Convert to string for merging
     transcripts_df['Participant_ID'] = transcripts_df['Participant_ID'].astype(str)
     labels_df['Participant_ID'] = labels_df['Participant_ID'].astype(str)
-    
-    # Merge
-    df = pd.merge(transcripts_df, labels_df[['Participant_ID', 'label']], 
-                  on='Participant_ID', how='inner')
-    
-    print(f"✅ Merged dataset shape: {df.shape}")
-    print(f"   Class distribution:\n{df['label'].value_counts()}")
-    
-    # Prepare data
+    df = pd.merge(transcripts_df, labels_df[['Participant_ID', 'label']], on='Participant_ID', how='inner')
     X_text = df['transcript']
     y = df['label']
-    
-    # Split
     X_train_text, X_test_text, y_train, y_test = train_test_split(
         X_text, y, test_size=TEST_SIZE, random_state=RANDOM_STATE, stratify=y
     )
-    
-    print(f"\nTraining set: {len(X_train_text)} samples")
-    print(f"Test set: {len(X_test_text)} samples")
-    
-    # ===== STEP 1: TF-IDF Vectorization =====
-    print("\n" + "="*60)
-    print("STEP 1: TF-IDF VECTORIZATION")
-    print("="*60)
-    
+
+    # TF-IDF
     vectorizer = TfidfVectorizer(
         max_features=MAX_FEATURES,
         min_df=MIN_DF,
@@ -80,179 +62,104 @@ def train_text_model():
         strip_accents='unicode',
         lowercase=True
     )
-    
     X_train_tfidf = vectorizer.fit_transform(X_train_text)
     X_test_tfidf = vectorizer.transform(X_test_text)
-    
-    print(f"TF-IDF features: {X_train_tfidf.shape[1]}")
-    print(f"Vocabulary size: {len(vectorizer.vocabulary_)}")
-    
-    # ===== STEP 2: Feature Selection =====
-    print("\n" + "="*60)
-    print(f"STEP 2: FEATURE SELECTION (Top {N_FEATURES_TO_SELECT})")
-    print("="*60)
-    
+
+    # Feature Selection
     selector = SelectKBest(chi2, k=min(N_FEATURES_TO_SELECT, X_train_tfidf.shape[1]))
     X_train_selected = selector.fit_transform(X_train_tfidf, y_train)
     X_test_selected = selector.transform(X_test_tfidf)
-    
-    print(f"Original features: {X_train_tfidf.shape[1]}")
-    print(f"Selected features: {X_train_selected.shape[1]}")
-    
-    # Get selected feature names
-    feature_names = vectorizer.get_feature_names_out()
-    selected_features = feature_names[selector.get_support()]
-    print(f"\nTop 20 selected features: {list(selected_features[:20])}")
-    
-    # ===== STEP 3: SMOTETomek =====
-    print("\n" + "="*60)
-    print("STEP 3: APPLYING SMOTETomek")
-    print("="*60)
-    
+
+    # SMOTETomek
     smt = SMOTETomek(random_state=RANDOM_STATE)
     X_train_resampled, y_train_resampled = smt.fit_resample(X_train_selected.toarray(), y_train)
-    
-    print(f"Before SMOTETomek: {dict(y_train.value_counts())}")
-    print(f"After SMOTETomek:  {dict(pd.Series(y_train_resampled).value_counts())}")
-    
-    # ===== STEP 4: Scaling =====
-    print("\n" + "="*60)
-    print("STEP 4: SCALING FEATURES")
-    print("="*60)
-    
+
+    # Scaling
     scaler = StandardScaler()
     X_train_scaled = scaler.fit_transform(X_train_resampled)
     X_test_scaled = scaler.transform(X_test_selected.toarray())
-    
-    # ===== STEP 5: Hyperparameter Tuning =====
-    print("\n" + "="*60)
-    print("STEP 5: HYPERPARAMETER TUNING (Random Forest)")
-    print("="*60)
-    
+
+    # Models to compare
+    models = [
+        ("Logistic Regression", LogisticRegression(max_iter=1000, class_weight='balanced', random_state=RANDOM_STATE)),
+        ("SVM (RBF)", SVC(kernel='rbf', class_weight='balanced', probability=True, random_state=RANDOM_STATE)),
+        ("Random Forest", RandomForestClassifier(n_estimators=200, class_weight='balanced', random_state=RANDOM_STATE)),
+        ("Gradient Boosting", GradientBoostingClassifier(n_estimators=200, learning_rate=0.1, max_depth=5, random_state=RANDOM_STATE)),
+        ("XGBoost", XGBClassifier(
+            random_state=RANDOM_STATE,
+            scale_pos_weight=len(y_train_resampled[y_train_resampled==0]) / len(y_train_resampled[y_train_resampled==1]),
+            n_estimators=200,
+            max_depth=5,
+            learning_rate=0.1,
+            subsample=0.8,
+            use_label_encoder=False,
+            eval_metric='logloss'
+        ))
+    ]
+
+    # Advanced Ensemble (RF+GB)
+    # Hyperparameter tuning for RF
     param_grid = {
-        'n_estimators': [200, 300, 400],
-        'max_depth': [15, 20, 25, None],
-        'min_samples_split': [2, 5, 10],
-        'min_samples_leaf': [1, 2, 4],
-        'max_features': ['sqrt', 'log2']
+        'n_estimators': [200],
+        'max_depth': [15],
+        'min_samples_split': [2],
+        'min_samples_leaf': [1],
+        'max_features': ['sqrt']
     }
-    
-    rf_base = RandomForestClassifier(
-        random_state=RANDOM_STATE,
-        class_weight='balanced',
-        n_jobs=-1
-    )
-    
+    rf_base = RandomForestClassifier(random_state=RANDOM_STATE, class_weight='balanced', n_jobs=-1)
     cv = StratifiedKFold(n_splits=CV_FOLDS, shuffle=True, random_state=RANDOM_STATE)
     grid_search = GridSearchCV(
-        rf_base, 
-        param_grid, 
-        cv=cv, 
-        scoring='f1_weighted',
-        n_jobs=-1,
-        verbose=1
+        rf_base, param_grid, cv=cv, scoring='f1_weighted', n_jobs=-1, verbose=0
     )
-    
-    print("Starting Grid Search (this may take a few minutes)...")
     grid_search.fit(X_train_scaled, y_train_resampled)
-    
-    print(f"\n✅ Best parameters: {grid_search.best_params_}")
-    print(f"✅ Best CV F1 score: {grid_search.best_score_:.4f}")
-    
-    # ===== STEP 6: Train Ensemble Model =====
-    print("\n" + "="*60)
-    print("STEP 6: TRAINING ENSEMBLE MODEL")
-    print("="*60)
-    
     best_rf = grid_search.best_estimator_
-    
     gb = GradientBoostingClassifier(
-        n_estimators=300,
-        learning_rate=0.05,
-        max_depth=5,
-        min_samples_split=5,
-        min_samples_leaf=2,
-        subsample=0.8,
-        random_state=RANDOM_STATE
+        n_estimators=300, learning_rate=0.05, max_depth=5, min_samples_split=5,
+        min_samples_leaf=2, subsample=0.8, random_state=RANDOM_STATE
     )
-    
     ensemble = VotingClassifier(
-        estimators=[
-            ('rf', best_rf),
-            ('gb', gb)
-        ],
-        voting='soft',
-        weights=[1.5, 1]
+        estimators=[('rf', best_rf), ('gb', gb)],
+        voting='soft', weights=[1.5, 1]
     )
-    
-    print("Training ensemble model...")
-    ensemble.fit(X_train_scaled, y_train_resampled)
-    
-    # ===== STEP 7: Evaluate =====
-    print("\n" + "="*60)
-    print("EVALUATION ON TEST SET")
-    print("="*60)
-    
-    y_pred = ensemble.predict(X_test_scaled)
-    y_pred_proba = ensemble.predict_proba(X_test_scaled)
-    
-    accuracy = accuracy_score(y_test, y_pred)
-    f1 = f1_score(y_test, y_pred, average='weighted')
-    
-    print(f"✅ Accuracy: {accuracy:.4f} ({accuracy*100:.2f}%)")
-    print(f"✅ Weighted F1 Score: {f1:.4f}")
-    
-    print("\nClassification Report:")
-    print(classification_report(y_test, y_pred, 
-                                target_names=['Not Depressed (0)', 'Depressed (1)']))
-    
-    print("\nConfusion Matrix:")
-    cm = confusion_matrix(y_test, y_pred)
-    print(cm)
-    
-    tn, fp, fn, tp = cm.ravel()
-    specificity = tn / (tn + fp)
-    sensitivity = tp / (tp + fn)
-    print(f"\nSpecificity (Class 0): {specificity:.4f}")
-    print(f"Sensitivity (Class 1): {sensitivity:.4f}")
-    
-    # ===== STEP 8: Save Everything =====
-    print("\n" + "="*60)
-    print("SAVING MODEL, VECTORIZER, SCALER, AND SELECTOR")
-    print("="*60)
-    
-    joblib.dump(ensemble, BEST_MODEL_PATH)
-    joblib.dump(vectorizer, VECTORIZER_PATH)
-    joblib.dump(scaler, SCALER_PATH)
-    
-    selector_path = os.path.join(MODELS_DIR, "feature_selector.pkl")
-    joblib.dump(selector, selector_path)
-    
-    print(f"✅ Ensemble model saved to: {BEST_MODEL_PATH}")
-    print(f"✅ Vectorizer saved to: {VECTORIZER_PATH}")
-    print(f"✅ Scaler saved to: {SCALER_PATH}")
-    print(f"✅ Feature selector saved to: {selector_path}")
-    print(f"\n🎯 Final Test Accuracy: {accuracy:.4f} ({accuracy*100:.2f}%)")
-    
-    # Feature importances
-    rf_model = ensemble.estimators_[0]
-    feature_importance = pd.DataFrame({
-        'feature': selected_features,
-        'importance': rf_model.feature_importances_
-    }).sort_values('importance', ascending=False)
-    
-    print("\nTop 20 Most Important Words/Phrases:")
-    print(feature_importance.head(20).to_string(index=False))
-    
-    return ensemble, vectorizer, scaler, selector
+    models.append(("Advanced Ensemble (RF+GB+SMOTETomek+FS)", ensemble))
+
+    # Results
+    results = []
+    def evaluate_model(name, model, X_train, y_train, X_test, y_test):
+        model.fit(X_train, y_train)
+        y_pred = model.predict(X_test)
+        report = classification_report(y_test, y_pred, output_dict=True, zero_division=0)
+        acc = accuracy_score(y_test, y_pred)
+        results.append({
+            "Model": name,
+            "Accuracy": acc,
+            "Precision (1)": report['1']['precision'],
+            "Recall (1)": report['1']['recall'],
+            "F1-score (1)": report['1']['f1-score'],
+            "Precision (0)": report['0']['precision'],
+            "Recall (0)": report['0']['recall'],
+            "F1-score (0)": report['0']['f1-score'],
+            "Support (1)": report['1']['support'],
+            "Support (0)": report['0']['support']
+        })
+        print(f"\n=== {name} ===")
+        print(f"Accuracy: {acc:.4f}")
+        print(classification_report(y_test, y_pred, target_names=['Not Depressed (0)', 'Depressed (1)']))
+
+    # Evaluate all models
+    for name, model in models:
+        evaluate_model(name, model, X_train_scaled, y_train_resampled, X_test_scaled, y_test)
+
+    # Show results table
+    results_df = pd.DataFrame(results)
+    print("\n\n==== Model Comparison Table ====")
+    print(results_df.sort_values("F1-score (1)", ascending=False).to_string(index=False))
 
 if __name__ == "__main__":
     print("\n" + "="*60)
-    print("🚀 STARTING TEXT MODEL TRAINING")
+    print("🚀 STARTING TEXT MODEL TRAINING & COMPARISON")
     print("="*60)
-    
-    model, vectorizer, scaler, selector = train_text_model()
-    
+    compare_text_models()
     print("\n" + "="*60)
-    print("✅ TRAINING COMPLETE!")
+    print("✅ ALL TRAINING & COMPARISON COMPLETE!")
     print("="*60)
